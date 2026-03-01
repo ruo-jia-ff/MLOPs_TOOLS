@@ -2,6 +2,7 @@ from azure_blob_user import create_blob_storage_client_via_key, AzureBlobUser
 from postgres_client import PostgresClient
 
 import os
+import json
 import uuid
 import torch
 
@@ -10,7 +11,11 @@ from dotenv import load_dotenv
 
 # Postgres and checkpoint from env values
 load_dotenv(".env.postgres")
+load_dotenv(".env.postgres.keys")
 load_dotenv(".env.checkpoints")
+load_dotenv("/app/env_folder/.env.postgres") 
+load_dotenv("/app/env_postgres_keys")
+load_dotenv("/app/env_checkpoints")
 
 #########################################################################
 ##################  CALL BACK FOR BLOB_STORAGE UPDATE ###################
@@ -130,15 +135,22 @@ class PostgresLoggingCallback:
                             initialize_on_construction = True
                             )
 
+        print(os.getenv("ML_WRITER_USER"))
+        print(os.getenv("ML_WRITER_PW"))
+        print(os.getenv("HOST"))
+        print(os.getenv("TRAIN_DATABASE"))
+        print(os.getenv("TRAIN_LOG_TABLE"))
+
         # Override database if provided
         if db_name:
+            print(db_name)
             self.pg_client.switch_db(db_name)
             print(f"[INFO] Switched to database: {db_name}")
 
         # Override table if provided
         if not self.pg_client.table_name:
             self.pg_client.set_table(table_name)
-            print(f"[INFO] Loggin will use table: {table_name}")
+            print(f"[INFO] Logging will use table: {table_name}")
 
         # Check we have a table to write to
         if not self.pg_client.table_name:
@@ -151,9 +163,11 @@ class PostgresLoggingCallback:
         self.metadata = metadata or {}
         self.custom_fields = custom_fields or {}
 
-        # Load the keys to extract from the .env
-        self.keys_we_want = os.getenv("TRAIN_LOG_KEYS", "").split(',')
-        self.keys_we_want = [key.strip() for key in self.keys_we_want]  # Clean extra spaces
+        # Load the keys to extract from the .env.postgres
+        train_log_keys_raw = os.getenv("TRAIN_LOG_KEYS", "[]")
+        print(f"Raw TRAIN_LOG_KEYS: {train_log_keys_raw}")
+        self.keys_we_want = json.loads(train_log_keys_raw)
+        print(f"THESE ARE THE KEYS WE WANT: {self.keys_we_want}")
 
     def _construct_row_to_upload(self, trainer, row_to_upload = None):
         """
@@ -166,13 +180,8 @@ class PostgresLoggingCallback:
             # Include metadata
             row_to_upload.update(self.metadata)
 
-            # Dynamically extract relevant attributes from the trainer
-            keys_we_want = set(['project_name', 'run_id', 'epoch', 'val_loss', 'val_acc', 
-                                'learning_rate', 'checkpoint_path', 'checkpoint_upload_success',
-                                'checkpoint_upload_error', 'average_train_loss', 'average_train_accuracy'])
-
             for key, value in trainer.__dict__.items():
-                if key in keys_we_want:
+                if key in self.keys_we_want:
                     row_to_upload[key] = value
 
             print("Using DATA from Trainer...")
