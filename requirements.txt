@@ -1,0 +1,26 @@
+# Data and ML tools
+dotenv
+numpy<2
+pandas==2.2.3
+scikit-learn==1.4.0
+tqdm==4.66.1
+ipykernel==6.29.4
+
+# Image processing
+opencv-python==4.9.0.80
+Pillow==10.3.0
+rembg==2.0.50
+
+# PyTorch (GPU, CUDA 11.8)
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.2.1+cu118
+torchvision==0.17.1+cu118
+
+# ONNX for production
+onnx==1.14.1
+onnxruntime-gpu==1.17.0
+
+# Azure tools
+psycopg2
+azure-storage-blob
+azure-core
