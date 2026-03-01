@@ -3,6 +3,7 @@ dotenv
 tqdm==4.66.1
 
 # Azure tools
-psycopg2
+psycopg2-binary
 azure-storage-blob
 azure-core
+
