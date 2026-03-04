@@ -18,8 +18,14 @@ jobs:
       - name: Read image name from README.md
         id: read_image_name
         run: |
+          # Get the first non-header line as IMAGE_NAME
           IMAGE_NAME=$(grep -v '^#' README.md | grep -v '^\s*$' | head -n 1)
           echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          
+          # Get the description (everything after the first non-header line)
+          DESCRIPTION=$(grep -v '^#' README.md | grep -v '^\s*$' | tail -n +3 | tr '\n' ' ')
+          echo "DESCRIPTION=$DESCRIPTION" >> $GITHUB_OUTPUT
+          
         shell: bash
 
       # Step 3: Sanitize image name, build, save, and upload
@@ -27,6 +33,7 @@ jobs:
         run: |
           # Sanitize name and build tag
           IMAGE_NAME_SANITIZED=$(echo "${{ steps.read_image_name.outputs.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+          DESCRIPTION="${{ steps.read_image_name.outputs.IMAGE_NAME }}"
           TIME_STAMP=$(date -u +"%Y-%m-%d-%H-%M-%S")
           IMAGE_NAME_TAG="${IMAGE_NAME_SANITIZED}:${TIME_STAMP}"
           echo "Image tag: $IMAGE_NAME_TAG"
@@ -46,4 +53,9 @@ jobs:
             --file "$IMAGE_FILE_NAME" \
             --sas-token "${{ secrets.AZURE_BLOB_SAS_TOKEN }}" \
             --overwrite
+
+          # Insert the details into PostgreSQL (ml_jobs_table)
+          psql "host=${{ secrets.AZURE_POSTGRES_HOST }} port=${{ secrets.AZURE_POSTGRES_PORT }} dbname=${{ secrets.AZURE_POSTGRES_DB }} user=${{ secrets.AZURE_POSTGRES_USER }} password=${{ secrets.AZURE_POSTGRES_PW }} sslmode=require" \
+            -c "INSERT INTO ml_jobs_table(docker_image_name, docker_image_blob_path, docker_image_description) 
+                VALUES ('$IMAGE_NAME_SANITIZED', 'https://$AZURE_ACCOUNT_NAME.blob.core.windows.net/$AZURE_CONTAINER_NAME/$IMAGE_FILE_NAME', '$DESCRIPTION');"
         shell: bash
