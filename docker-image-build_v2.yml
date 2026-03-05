@@ -55,7 +55,28 @@ jobs:
             --overwrite
 
           # Insert the details into PostgreSQL (ml_jobs_table)
-          psql "host=${{ secrets.AZURE_POSTGRES_HOST }} port=${{ secrets.AZURE_POSTGRES_PORT }} dbname=${{ secrets.AZURE_POSTGRES_DB }} user=${{ secrets.AZURE_POSTGRES_USER }} password=${{ secrets.AZURE_POSTGRES_PW }} sslmode=require" \
-            -c "INSERT INTO ml_jobs_table(docker_image_name, docker_image_blob_path, docker_image_description) 
-                VALUES ('$IMAGE_NAME_SANITIZED', 'https://$AZURE_ACCOUNT_NAME.blob.core.windows.net/$AZURE_CONTAINER_NAME/$IMAGE_FILE_NAME', '$DESCRIPTION');"
+          # Insert the details into PostgreSQL (ml_jobs_table) AND notify listeners
+          psql "host=${{ secrets.AZURE_POSTGRES_HOST }} \
+                port=${{ secrets.AZURE_POSTGRES_PORT }} \
+                dbname=${{ secrets.AZURE_POSTGRES_DB }} \
+                user=${{ secrets.AZURE_POSTGRES_USER }} \
+                password=${{ secrets.AZURE_POSTGRES_PW }} \
+                sslmode=require" <<EOF
+         
+          BEGIN;
+          
+          INSERT INTO ml_jobs_table(
+              docker_image_name,
+              docker_image_blob_path,
+              docker_image_description
+          )
+          VALUES (
+              '$IMAGE_NAME_SANITIZED',
+              'https://${{ secrets.AZURE_ACCOUNT_NAME }}.blob.core.windows.net/${{ secrets.AZURE_CONTAINER_NAME }}/$IMAGE_FILE_NAME',
+              '$DESCRIPTION'
+          );
+          
+          NOTIFY ml_tasks, 'check blob: ${{docker_image_blob_path}}';
+          COMMIT;
+          EOF
         shell: bash
