@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv(".env.blob")
+load_dotenv("/app/env_folder/.env.blob")
 STORAGE_ACCOUNT = os.getenv('BLOB_STORAGE_ACCOUNT')
 ACCESS_KEY = os.getenv('BLOB_ACCESS_KEY')
 
