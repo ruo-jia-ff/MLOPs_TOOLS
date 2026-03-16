@@ -11,11 +11,13 @@ from dotenv import load_dotenv
 
 # Postgres and checkpoint from env values
 load_dotenv(".env.postgres")
-load_dotenv(".env.postgres.keys")
+load_dotenv(".env.postgres.mlops")
+load_dotenv(".env.postgres.train")
 load_dotenv(".env.checkpoints")
-load_dotenv("/app/env_folder/.env.postgres") 
-load_dotenv("/app/env_postgres_keys")
-load_dotenv("/app/env_checkpoints")
+load_dotenv("/app/env_folder/.env.postgres")
+load_dotenv("/app/env_folder/.env.postgres.train")
+load_dotenv("/app/env_folder/.env.postgres.mlops")
+load_dotenv("/app/env_folder/env.checkpoints")
 
 #########################################################################
 ##################  CALL BACK FOR BLOB_STORAGE UPDATE ###################
