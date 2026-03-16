@@ -90,9 +90,8 @@ class AzureCheckpointCallback:
 
             # Upload to Azure
             self.blob_user.upload_file_to_blob_container(
-                checkpoint_file,
-                self.blob_container_name,
-                blob_name
+                local_file_path=checkpoint_file,
+                blob_name=blob_name
             )
 
             if os.path.exists(checkpoint_file):
