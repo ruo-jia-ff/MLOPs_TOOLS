@@ -1,6 +1,7 @@
 import psycopg2
 from psycopg2 import sql
 from contextlib import contextmanager
+import time
 
 # Normal PostgresClient
 class PostgresClient:
@@ -64,6 +65,32 @@ class PostgresClient:
         if self.conn:
             self.conn.close()
             self.conn = None
+
+    # ---------- Connection Health ----------
+    def _connection_is_alive(self):
+        """Check if the current connection is alive."""
+        if not self.conn:
+            return False
+        try:
+            self.conn.poll()
+            return True
+        except Exception:
+            return False
+
+    def _reconnect(self, retries=5, delay=30):
+        """Attempt to reconnect to the database."""
+        for attempt in range(1, retries + 1):
+            try:
+                print(f"Reconnection attempt {attempt}/{retries}...")
+                self.connect(self.db_name, autocommit=self.autocommit)
+                print("Reconnected successfully.")
+                return True
+            except Exception as e:
+                print(f"Reconnect attempt {attempt} failed: {e}")
+                if attempt < retries:
+                    time.sleep(delay)
+        print(f"All {retries} reconnection attempts failed.")
+        return False
 
     # ---------- Context Manager (Connection Scope) ----------
     def __enter__(self):
@@ -191,6 +218,17 @@ class PostgresClient:
             )
 
         return privileges
+    
+    def send_notification(self, 
+                          channel = "ml_tasks", 
+                          message="Check - ml_jobs_table"):
+        
+        """Send a notification to the database."""
+        with self.conn.cursor() as cursor:
+            cursor.execute(f"NOTIFY {channel}, %s;", (message,))
+            print("\n".join(["Notification sent!", 
+                             f"channel: {channel}", 
+                             f"message: {message}"]))
 
     def has_table_permission(self, table, privilege):
         """
@@ -218,7 +256,7 @@ class PostgresClient:
             )
 
     # ---------- Inspect Columns ----------
-    def return_table_columns(self, table = None):
+    def return_table_columns(self, table = None, show_id = False):
         """
         Return user-defined column names for a table in the public schema.
         Ignores columns with defaults or auto-increment identity (e.g., SERIAL, timestamps).
@@ -226,6 +264,7 @@ class PostgresClient:
         Parameters:
         ----------
         table : Optional Table name, default is self.table_name
+        show_id : return column defaults
 
         Returns: 
         -------
@@ -248,21 +287,31 @@ class PostgresClient:
 
         try:
             with self.conn.cursor() as cursor:
-                cursor.execute("""
+
+                base_query = """
                     SELECT column_name
                     FROM information_schema.columns
                     WHERE table_name = %s
-                      AND table_schema = 'public'
-                      AND column_default IS NULL
-                      AND is_identity = 'NO';
-                """, (table,))
+                    AND table_schema = 'public'
+                """
 
+                # Hide default / identity columns unless explicitly requested
+                if not show_id:
+                    base_query += """
+                        AND column_default IS NULL
+                        AND is_identity = 'NO'
+                    """
+
+                base_query += " ORDER BY ordinal_position;"
+
+                cursor.execute(base_query, (table,))
                 columns = [row[0] for row in cursor.fetchall()]
+
                 return columns
 
         except Exception as e:
-            raise RuntimeError(f"Error fetching user-defined columns for '{table}': {e}")
-        
+            raise RuntimeError(f"Error fetching columns for '{table}': {e}")   
+             
   # ---------- Input Validation of Data to be Written ----------
     def check_input_format_against_table_schema(self, input_values_dict, table = None):
         """
@@ -317,15 +366,22 @@ class PostgresClient:
             raise RuntimeError(f"Error validating dictionary keys against table '{table}': {e}")
 
     # ---------- Input Execution ----------
-    def insert_values_into_table(self, data_as_dicts, table = None, return_last_rows=False, last_n=5):
+    def insert_values_into_table(self, 
+                                data_as_dicts, 
+                                table = None, 
+                                return_last_rows=False, 
+                                last_n=5,
+                                custom_message = None):
         """
         Insert one or more dictionaries of values into PostgreSQL set table safely.
 
         Parameters:
         ----------
         data_as_dicts : Single dict or list of dicts to insert.
+        table : Name of table being inserted into within DB
         return_last_rows : Return last `last_n` rows after insert. (Bool, optional)
         last_n : Number of rows to return. (int, optional)
+        custom_message : Message for display after insertion
 
         Returns:
         -------
@@ -385,7 +441,11 @@ class PostgresClient:
                     )
 
                     cursor.executemany(insert_query, values)
-                    print("Data insertion successful!")
+
+                    if custom_message:
+                        print(custom_message)
+                    else:
+                        print("Data insertion successful!")
 
                     # Optionally fetch last rows if requested
                     if return_last_rows:
@@ -513,8 +573,10 @@ class PostgresClient:
                                 where_conditions = None, 
                                 n=5,
                                 return_results_formatted = False,
+                                print_results = False,
                                 order_by=None, 
-                                descending=True):
+                                descending=True,
+                                show_id=False):
         
         """
         Fetch the last `n` rows from table safely, returning only selected columns. 
@@ -522,10 +584,11 @@ class PostgresClient:
         Parameters:
         ----------
         table : If None then default for table isself.table_name)
-        where_conditions : Column-value pairs for WHERE clause aka filter condition. (optional, as a dict) 
+        where_conditions : WHERE clause aka filter condition. (optional, as a dict, key is col, value is = condition) 
         n : Number of rows to return (optional n = 5)
         order_by : column(s) to sort return values by (default is None)
         descending : If True, return by descending values (default is True)
+        show_id : If True, return id and created_date columns (default is false)
 
         Returns:
         -------
@@ -541,40 +604,22 @@ class PostgresClient:
 
         if not self.conn:
             raise RuntimeError("No database selected.")
+        
+        if order_by:
+            order_by_clause = sql.SQL("ORDER BY {col} {direction}").format(
+                col=sql.Identifier(order_by),
+                direction=sql.SQL("DESC") if descending else sql.SQL("ASC")
+            )
+        else:
+            order_by_clause = sql.SQL("ORDER BY id DESC")
 
         try:
             with self.conn.cursor() as cursor:
-                # Get allowed columns (no default, not identity)
-                cursor.execute("""
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_name = %s
-                    AND table_schema = 'public'
-                    AND column_default IS NULL
-                    AND is_identity = 'NO';
-                """, (table,))
 
-                columns = [row[0] for row in cursor.fetchall()]
-                if not columns:
-                    raise RuntimeError(f"No matching columns found in table '{table}'.")
-
-                # Determine column to order by
-                if order_by is None:
-                    order_by = columns[0]
-                elif order_by not in columns:
-                    raise RuntimeError(f"Invalid order_by column: '{order_by}'")
-
-                # Build SELECT clause safely
-                select_columns = sql.SQL(", ").join(
-                    sql.Identifier(col) for col in columns
-                )
-
-                # Values that will populate query
                 values = []
-
-                # Optional WHERE clause
                 where_clause = sql.SQL("")
 
+                # Build WHERE clause
                 if where_conditions:
                     where_clause = sql.SQL("WHERE ") + sql.SQL(" AND ").join(
                         sql.SQL("{} = {}").format(
@@ -586,27 +631,44 @@ class PostgresClient:
                     values.extend(where_conditions.values())
 
                 query = sql.SQL("""
-                    SELECT {cols}
+                    SELECT *
                     FROM {table}
                     {where_clause}
-                    ORDER BY {order_by} {direction}
+                    {order_by_clause}
                     LIMIT %s
                 """).format(
-                    cols=select_columns,
-                    table=sql.Identifier(self.table_name),
+                    table=sql.Identifier(table),
                     where_clause=where_clause,
-                    order_by=sql.Identifier(order_by),
-                    direction=sql.SQL("DESC") if descending else sql.SQL("ASC")
+                    order_by_clause=order_by_clause
                 )
 
                 values.append(n)
                 cursor.execute(query, values)
+
                 rows = cursor.fetchall()
+                column_names = [desc[0] for desc in cursor.description]
+
+                # Optionally remove default columns like id / created_at
+                if not show_id:
+                    filtered_indices = [
+                        i for i, col in enumerate(column_names)
+                        if col not in {"id", "created_at"}
+                    ]
+
+                    column_names = [column_names[i] for i in filtered_indices]
+                    rows = [[row[i] for i in filtered_indices] for row in rows]
+
+                if print_results:
+                    print(" | ".join(column_names))
+                    print("-" * (len(column_names) * 15))
+                    for row in rows:
+                        print(" | ".join(str(v) for v in row))
 
                 if return_results_formatted:
-                    
+                    new_rows = []
                     for row in rows:
-                        print(", ".join([f"{col}: {val}" for col, val in zip(self.return_table_columns(table), row)]))
+                        new_rows += [{k: v for k, v in zip(column_names, list(row))}]
+                    rows = new_rows
 
                 return rows
 
@@ -623,7 +685,6 @@ class PostgresClient:
         bool
             True if the current user can read from the table, False otherwise.
         """
-
         table = table or self.table_name
 
         # Ensure table is a valid string

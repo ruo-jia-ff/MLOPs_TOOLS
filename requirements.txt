@@ -1,9 +1,9 @@
-# Data and ML tools
-dotenv
-tqdm==4.66.1
+# System tools
+gputil==1.4.0
+psutil==5.9.8
+ipykernel==6.29.4
 
 # Azure tools
 psycopg2-binary
 azure-storage-blob
 azure-core
-

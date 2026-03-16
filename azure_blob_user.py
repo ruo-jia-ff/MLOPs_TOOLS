@@ -1,17 +1,15 @@
 from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient, generate_account_sas, ResourceTypes, AccountSasPermissions
 from azure.core.exceptions import AzureError
 from datetime import datetime, timedelta, timezone
-import time
 
 import os 
 from dotenv import load_dotenv
 
 load_dotenv(".env.blob")
-load_dotenv("/app/env_folder/.env.blob")
-STORAGE_ACCOUNT = os.getenv('BLOB_STORAGE_ACCOUNT')
-ACCESS_KEY = os.getenv('BLOB_ACCESS_KEY')
+STORAGE_ACCOUNT = os.getenv('STORAGE_ACCOUNT')
+ACCESS_KEY = os.getenv('ACCESS_KEY')
 
-def create_blob_storage_client_via_key(hours_of_use: int = 144):
+def create_blob_storage_client_via_key(hours_of_use: int = 72):
 
     expiry = datetime.now(timezone.utc) + timedelta(hours=hours_of_use)
 
@@ -91,18 +89,13 @@ class AzureBlobUser:
             return "No blob service client available..."
         
         # Set the container 
-        try:
-            container_client = self.blob_service_client.get_container_client(container_name)
-            self.container_client = container_client
-
-            print(f"Established connection to: {container_name}")
+        container_client = self.blob_service_client.get_container_client(container_name)
+        self.container_client = container_client
         
-            if list_blobs:
-                print(f"Blobs in container {container_name}:")
-                for blob in container_client.list_blobs():
-                    print(f"- {blob.name}")
-        except:
-            print(f"Failed to establish connection to {container_name} or it may not exist...")
+        if list_blobs:
+            print(f"Blobs in container {container_name}:")
+            for blob in container_client.list_blobs():
+                print(f"- {blob.name}")
 
     def list_blobs_in_container(self,
                                 container = None,
@@ -165,9 +158,7 @@ class AzureBlobUser:
       
     def download_blob_client_contents(self,
                                       download_path = None,
-                                      chunk_size = 10 * 1024 * 1024,
-                                      max_retries = 3,
-                                      retry_delay = 5):
+                                      chunk_size = 10 * 1024 * 1024):
         
         if self.blob_client is None:
             print("No blob client set...")
@@ -176,114 +167,65 @@ class AzureBlobUser:
         if download_path is None:
             download_path = os.path.join(os.getcwd(), self.blob_client.blob_name)
 
-        attempt = 0
+        try:
+            # Download the file and read it in as chunks
+            stream = self.blob_client.download_blob()    
+            with open(download_path, "wb") as file:
+                while True:
+                    chunk = stream.read(chunk_size)                    
+                    
+                    if not chunk:
+                        break 
 
-        while attempt <= max_retries:
-            try:
-                stream = self.blob_client.download_blob()
+                    file.write(chunk)
+        
+            return download_path
 
-                with open(download_path, "wb") as file:
-                    while True:
-                        chunk = stream.read(chunk_size)
-                        if not chunk:
-                            break
-                        file.write(chunk)
-
-                return download_path  # success
-
-            except AzureError as error:
-                attempt += 1
-
-                if attempt > max_retries:
-                    raise RuntimeError(
-                        f"Download failed after {max_retries} retries."
-                    ) from error
-
-                sleep_time = retry_delay * (2 ** (attempt - 1))  # exponential backoff
-                print(
-                    f"Download attempt {attempt} failed. "
-                    f"Retrying in {sleep_time} seconds..."
-                )
-                time.sleep(sleep_time)
+        except AzureError as e:
+            print(f"Download failed... error: {e}")
 
     def upload_file_to_blob_container(self,
                                       local_file_path, 
-                                      container_name = None,
                                       blob_name = None,
-                                      max_retries = 3,
-                                      retry_delay = 5,
-                                      raise_error_if_failed = False):
-        
+                                      container = None,):
 
-        attempt = 0
+        try:
+            if container is None:
+                container = self.container_client
 
-        if container_name:
-            try:
-                self.establish_blob_container(container_name)
-            except:
-                print(f"WARNING!! Unable to establish connection to {container_name}... switching to default")
-        else:
-            print(f"Warning: No client set... defaulting to {self.container_client.container_name}")
-        
-        container = self.container_client
-
-        if container is None:
-            print("Default container is None... No upload possible... ending now")
-            return None 
-        
-        attempt = 0
-        while attempt <= max_retries:
-
-            try:          
-                # Default to local file path's blob name 
-                if blob_name is None:
-                    blob_name = os.path.basename(local_file_path)
-
-                blob_client = container.get_blob_client(blob_name)
-
-                # Upload the file to the blob storage
-                with open(local_file_path, "rb") as data:
-                    blob_client.upload_blob(data, overwrite=True)  # Set overwrite=True to overwrite an existing blob with the same name
-
-                print(f"File '{local_file_path}' uploaded to blob storage as '{blob_name}' in container '{container.container_name}'")
-
-                return blob_name  # success
+            if container is None:
+                print("No container to upload to...")
+                return None 
             
-            except AzureError as error:
-                attempt += 1
-                
-                if (attempt > max_retries) and (raise_error_if_failed):
-                    raise RuntimeError(
-                        f"Upload failed after {max_retries} retries."
-                    ) from error
+            # Default to local file path's blob name 
+            if blob_name is None:
+                blob_name = os.path.basename(local_file_path)
 
-                sleep_time = retry_delay * (2 ** (attempt - 1))  # exponential backoff
-                print(
-                    f"Upload attempt {attempt} failed. "
-                    f"Retrying in {sleep_time} seconds..."
-                )
-                time.sleep(sleep_time)
+            blob_client = self.container_client.get_blob_client(blob_name)
 
-        print(f"Unable to upload {local_file_path} to blob...")
+            # Upload the file to the blob storage
+            with open(local_file_path, "rb") as data:
+                blob_client.upload_blob(data, overwrite=True)  # Set overwrite=True to overwrite an existing blob with the same name
+
+            print(f"File '{local_file_path}' uploaded to blob storage as '{blob_name}' in container '{container.container_name}'")
+        
+        except Exception as e:
+            print(f"An error occurred, file could not be uploaded: {e}")
 
     def delete_blob(self,
-                    blob_name = None,
-                    verbose = True):    
+                    blob_client = None,
+                    verbose = True):
 
-        # Default to blob_client when no blob_name is given.
-        if blob_name is None and self.blob_client:
-           blob_name = self.blob_client.blob_name
-           blob_client = self.blob_client
-        else:
-           blob_client = self.container_client.get_blob_client(blob_name)
+        if blob_client is None:
+            blob_client = self.blob_client
 
-        if not blob_client:        
+        if blob_client is None:        
             print("No blob to delete...")
 
-        blob_client.delete_blob()
+        self.blob_client.delete_blob()
 
         if verbose:
-            print(f"{blob_name} has been deleted from {self.container_client.container_name}")
+            print(f"{blob_client.blob_name} has been deleted from {blob_client.container_name}")
 
     def delete_all_container_files(self,
                                    container = None):
@@ -328,5 +270,4 @@ class AzureBlobUser:
             print(text_content)
 
             if clean_up:
-
                 blob_client.delete_blob()
