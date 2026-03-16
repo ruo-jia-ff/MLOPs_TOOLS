@@ -6,8 +6,8 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv(".env.blob")
-STORAGE_ACCOUNT = os.getenv('STORAGE_ACCOUNT')
-ACCESS_KEY = os.getenv('ACCESS_KEY')
+STORAGE_ACCOUNT = os.getenv('BLOB_STORAGE_ACCOUNT')
+ACCESS_KEY = os.getenv('BLOB_ACCESS_KEY')
 
 def create_blob_storage_client_via_key(hours_of_use: int = 72):
 
