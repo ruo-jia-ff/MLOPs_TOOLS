@@ -137,8 +137,6 @@ class PostgresLoggingCallback:
                             )
 
         print(os.getenv("ML_WRITER_USER"))
-        print(os.getenv("ML_WRITER_PW"))
-        print(os.getenv("HOST"))
         print(os.getenv("TRAIN_DATABASE"))
         print(os.getenv("TRAIN_LOG_TABLE"))
 
