@@ -117,28 +117,73 @@ class PostgresListener(PostgresClient):
             return_updated_rows=True
         )
 
-    def _fetch_next_queued_job(self):
-        """Fetch the next queued job and assign its values to the instance."""
-        rslts = self.fetch_n_rows_from_table(
-            table='ml_jobs_table',
-            n=30,
-            return_results_formatted=True,
-            print_results=False,
-            show_id=True,
-            where_conditions={"job_status": "Queued"}
-        )
+    def fetch_next_queued_job(self, 
+                            table=job_table, 
+                            status_col='job_status', 
+                            queued_value='Queued'):
+        
+        """Atomically fetch and claim the next queued job."""
+        query = f"""
+            UPDATE {table}
+            SET {status_col} = 'Processing',
+                worker_name = %s,
+                started_at = %s
+            WHERE id = (
+                SELECT id FROM {table}
+                WHERE {status_col} = %s
+                ORDER BY id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            RETURNING *;
+        """
+        
+        with self.conn.cursor() as cursor:
+            cursor.execute(query, [self.worker_name, datetime.now(timezone.utc), queued_value])
+            result = cursor.fetchone()
+            self.conn.commit()
 
-        if not rslts:
+        print(result)
+        if not result:
             return False
 
-        print("THESE ARE THE RESULTS!")
-        print(rslts)
-        print(rslts[0])
-        self.job_id = rslts[0].get('id')
-        self.blob_path = rslts[0].get('docker_image_blob_path')
-        self.docker_image_name = rslts[0].get('docker_image_name')
+        column_names = [desc[0] for desc in cursor.description]
+        result = {k: v for k, v in zip(column_names, list(result))}
+
+        self.job_id = result.get('id')
+        self.blob_path = result.get('docker_image_blob_path')
+        self.docker_image_name = result.get('docker_image_name')
+        print(f"Running: {self.job_id}, its docker image is {self.docker_image_name}")
 
         return True
+
+    def release_jobs_assigned_to_worker(self, 
+                                        job_table=job_table,
+                                        worker=None, # Default to self.worker_name
+                                        timeout_minutes=0):
+        
+        worker = worker or self.worker_name
+
+        query = f"""
+            UPDATE {job_table}
+            SET job_status = 'Queued',
+                worker_name = NULL,
+                started_at = NULL
+            WHERE job_status = 'Processing'
+            AND worker_name = %s
+            AND started_at < NOW() - INTERVAL '{timeout_minutes} minutes'
+            RETURNING id;
+        """
+        
+        with self.conn.cursor() as cursor:
+            cursor.execute(query, [worker])
+            released = cursor.fetchall()
+            self.conn.commit()
+
+        if released:
+            print(f"Worker: [{worker}] released from jobs: {[r[0] for r in released]}...")
+            print("Sending notification to workers to get these jobs..")
+            self.send_notification()
 
     def update_mlops_log(self, 
                          current_status,
@@ -147,6 +192,10 @@ class PostgresListener(PostgresClient):
                          num_attempts = 3):
 
         # Create a separate client to interact with the mlop_log_table
+
+        job_id = self.job_id or -1
+        docker_image_name = self.docker_image_name or "Not Applicable" 
+
         try:
             with PostgresClient(
                 user=self.user,
@@ -158,8 +207,8 @@ class PostgresListener(PostgresClient):
                 initialize_on_construction = True) as ml_logger:           
 
                     log_values = {
-                        "job_id": self.job_id,
-                        "docker_image_name": self.docker_image_name,
+                        "job_id": job_id,
+                        "docker_image_name": docker_image_name,
                         "current_status": current_status,
                         "worker_name": self.worker_name,
                         "notes": notes,
@@ -198,11 +247,15 @@ class PostgresListener(PostgresClient):
 
         print(f"Log written to {log_path}")
 
-    def listen_for_notifications(self, channel, timeout=10, verbose=False):
+    def listen_for_notifications(self, channel, timeout=10, release_jobs = True, verbose=False):
         """Listen for notifications on the specified channel."""
         try:
             if not self.conn:
                 raise Exception("Connection not established. Please connect first.")
+            
+            # Release any stuck jobs from a previous runs
+            if release_jobs:
+                self.release_jobs_assigned_to_worker()
 
             with self.conn.cursor() as cur:
                 cur.execute(f"LISTEN {channel};")
@@ -219,8 +272,8 @@ class PostgresListener(PostgresClient):
                             print(f"Re-listening on channel: {channel}")
 
                         if select.select([self.conn], [], [], timeout) == ([], [], []):
-                            if verbose:
-                                print(f"No notifications in the last {timeout} seconds.")
+#                            if verbose:
+#                                print(f"No notifications in the last {timeout} seconds.")
                             continue
 
                         self.conn.poll()
@@ -228,6 +281,11 @@ class PostgresListener(PostgresClient):
                         while self.conn.notifies:
                             notify = self.conn.notifies.pop()
                             print(f"Received notification on channel: '{notify.channel}': {notify.payload}")
+
+                            # Atomically claim a job before processing
+                            if not self.fetch_next_queued_job():
+                                print("No queued jobs found, skipping...")
+                                continue
 
                             try:
                                 self.process_payload()
@@ -265,30 +323,16 @@ class PostgresListener(PostgresClient):
         """Download payload and execute job."""
 
         try:
-            if not self._fetch_next_queued_job():
-                raise RuntimeError("No queued jobs found.")
-           
-            filter_condition = {"docker_image_blob_path": self.blob_path}
-            
             print(f"Trying to download docker image: {self.blob_path}")
             tar_file_path = acquire_blob_given_blobpath(self.blob_path)
 
             print("Starting job...")
-
-            # Update job status to be "Pending" as task starts 
-            start_job_values = {"job_status": "Pending", "started_at": datetime.now(timezone.utc),
-                                "worker_name": self.worker_name}
-            
-            # Log error into mlops_log_table
             self.update_mlops_log(current_status="Started")
-            self._update_job_status(filter_condition=filter_condition, 
-                                    new_values = start_job_values)
 
-            # Run task
             run_downloaded_blob_via_docker(tar_file_path)
 
-            # Update status to be "Completed"
             print("Finished job...")
+            filter_condition = {"docker_image_blob_path": self.blob_path}
             self.update_mlops_log(current_status="Finished")
             finished_job_values = {"job_status": "Completed", "finished_at": datetime.now(timezone.utc)}
             self._update_job_status(filter_condition=filter_condition, 
@@ -300,7 +344,6 @@ class PostgresListener(PostgresClient):
             print(f"Job execution failed: {e}\n{traceback.format_exc()}")
             error_message = self._format_error_for_pg(e)
            
-            # Log error into mlops_log_table
             self.update_mlops_log(current_status="Error running docker image",
                                   error_message=error_message)
 
